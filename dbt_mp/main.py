@@ -2,21 +2,31 @@ import argparse
 import json
 import subprocess
 import sys
+import logging
 
-def run_dbt_ls(select_statement):
+def run_dbt_ls(select_statement: str = ''):
     """
     Runs the 'dbt ls' command with the given selection statement
     and returns a list of JSON objects, one for each resource.
     """
     # Corrected command: removed 'macro' from resource types
-    command = ["dbt", "ls", "--select", select_statement, "--resource-type", "model", "source", "--output", "json"]
     try:
+        command = [
+            "dbt", 
+            "ls", 
+            "--resource-type", 
+            "model", 
+            "source", 
+            "--output", 
+            "json"
+            ] 
+        command = command + ["--select", select_statement] if select_statement else command
         print(f"Running command: {' '.join(command)}")
         result = subprocess.run(
             command,
             capture_output=True,
             text=True,
-            check=True
+            check=True,
         )
         # The output is a series of JSON objects, one per line.
         return [line for line in result.stdout.strip().split('\n') if line]
@@ -85,8 +95,8 @@ def main():
 
     parser.add_argument(
         "--select",
-        required=True,
-        help="The dbt selection syntax to filter the manifest. (e.g., '+stg_orders')"
+        required=False,
+        help="The dbt selection syntax to filter the manifest. (e.g., '+stg_orders')",
     )
 
     parser.add_argument(
@@ -97,28 +107,23 @@ def main():
     
     parser.add_argument(
         "--out-file",
-        required=True,
-        help="The path to write the filtered manifest JSON file."
+        help="The path to write the filtered manifest JSON file.",
+        default='manifest_slim.json'
     )
 
     args = parser.parse_args()
-    
-    # 1. Run 'dbt ls' to get the list of selected models and sources
-    ls_output_lines = run_dbt_ls(args.select)
-    
-    selected_unique_ids = []
-    for line in ls_output_lines:
-        try:
-            json_line = json.loads(line)
-            selected_unique_ids.append(json_line.get('unique_id'))
-        except json.JSONDecodeError:
-            print(f"Warning: Could not decode JSON from dbt ls output line: {line}", file=sys.stderr)
-            
-    selected_unique_ids = [uid for uid in selected_unique_ids if uid]
-    print(f"Found {len(selected_unique_ids)} matching models and sources from 'dbt ls'.")
 
-    # 2. Load the full manifest.json
+    # Compile and load the full manifest.json
     try:
+        compile_command = ["dbt", "compile", "--select", args.select] if args.select else ["dbt", "compile"]
+        print("Compiling models sql with command: " + ' '.join(compile_command))
+        subprocess.run(
+            compile_command,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        
         with open(args.manifest_path, 'r') as f:
             manifest = json.load(f)
     except FileNotFoundError:
@@ -128,8 +133,26 @@ def main():
     except json.JSONDecodeError:
         print(f"Error: Could not decode JSON from '{args.manifest_path}'.", file=sys.stderr)
         sys.exit(1)
+    
+    # Run 'dbt ls' to get the list of selected models and sources
+    ls_output_lines = run_dbt_ls(args.select)
+    
+    selected_unique_ids = []
+    for line in ls_output_lines:
+        if line.startswith('{'):
+            try:
+                json_line = json.loads(line)
+                selected_unique_ids.append(json_line.get('unique_id'))
+            except json.JSONDecodeError:
+                print(f"Warning: Could not decode JSON from dbt ls output line: {line}", file=sys.stderr)
+        else:
+            print(line)
+            
+    selected_unique_ids = [uid for uid in selected_unique_ids if uid]
+    print(f"Found {len(selected_unique_ids)} matching models and sources from 'dbt ls'.")
 
-    # 3. Find all dependent macros
+
+    # Find all dependent macros
     dependent_macros = set()
     for unique_id in selected_unique_ids:
         node = manifest['nodes'].get(unique_id)
@@ -144,7 +167,7 @@ def main():
     # Combine the selected nodes with their dependent macros
     final_selection_set = set(selected_unique_ids) | dependent_macros
 
-    # 4. Filter the manifest and slim it down
+    # Filter the manifest and slim it down
     slim_manifest = {
         'nodes': {},
         'sources': {},
