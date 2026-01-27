@@ -1,6 +1,6 @@
 [project]
 name = "dbt-mp"
-version = "0.1.1"
+version = "0.1.2"
 description = "dbt-mp : dbt manifest parser for agentic context "
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,3 +14,7 @@ dbt-mp = "dbt_mp.main:main"
 [tool.setuptools.packages.find]
 include = ["dbt_mp*"]
 exclude = ["target*"]
+
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+build_command = "echo 'Build handled by GitHub Action'"
