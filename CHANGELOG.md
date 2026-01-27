@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## v0.1.3 (2026-01-27)
+
+### Fix
+
+* fix: bump release ([`5857b9b`](https://github.com/luutuankiet/dbt-mp/commit/5857b9be09d645aa6db6b44b54773413020e07cd))
+
 ## v0.1.2 (2026-01-27)
 
 ### Fix
