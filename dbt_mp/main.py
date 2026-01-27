@@ -55,7 +55,6 @@ def slim_node(node):
             'incremental_strategy': config.get('incremental_strategy')
         },
         'tags': node.get('tags'),
-        'columns': node.get('columns'),
         'raw_code': node.get('raw_code'),
         'refs': node.get('refs'),
         'sources': node.get('sources'),
