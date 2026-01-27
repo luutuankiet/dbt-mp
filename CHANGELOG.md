@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## v0.1.4 (2026-01-27)
+
+### Fix
+
+* fix: reomove column key from output cause this is not consistently filled by dbt ([`582fdb6`](https://github.com/luutuankiet/dbt-mp/commit/582fdb65fd90870bc61993a4362bb3a33c14947b))
+
 ## v0.1.3 (2026-01-27)
 
 ### Fix
