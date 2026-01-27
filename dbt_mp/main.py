@@ -169,6 +169,7 @@ def main():
 
     # Filter the manifest and slim it down
     slim_manifest = {
+        'selection_used': args.select,
         'nodes': {},
         'sources': {},
         'macros': {}
