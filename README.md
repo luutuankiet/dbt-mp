@@ -103,3 +103,4 @@ The resulting `slim_manifest.json` will contain a lean, context-rich representat
 | `macro_sql` | The macro's code is essential, as it's injected into model SQL. |
 
 ---
+ 
