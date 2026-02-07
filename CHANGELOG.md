@@ -1,5 +1,21 @@
 # CHANGELOG
 
+## v0.2.0 (2026-02-07)
+
+### Documentation
+
+* docs: add gsd-lite plans ([`275dd5a`](https://github.com/luutuankiet/dbt-mp/commit/275dd5a80cee9f5db550dff3dd2e914f42c22376))
+
+### Feature
+
+* feat: adds jsonschema and debug model list into output ([`667c928`](https://github.com/luutuankiet/dbt-mp/commit/667c9285317dc4267687488888adf5aacabca72d))
+
+### Unknown
+
+* Merge pull request #2 from luutuankiet/feat/add_json_schema
+
+feat: adds jsonschema and debug model list into output ([`a540dce`](https://github.com/luutuankiet/dbt-mp/commit/a540dce3a60c08934573d7d9c5b556817a7dc485))
+
 ## v0.1.4 (2026-01-27)
 
 ### Fix
