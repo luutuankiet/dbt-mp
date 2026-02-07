@@ -3,6 +3,7 @@ import json
 import subprocess
 import sys
 import logging
+from dbt_mp.models import SlimNode, SlimNodeConfig, SlimSource, SlimMacro
 
 def run_dbt_ls(select_statement: str = ''):
     """
@@ -28,6 +29,11 @@ def run_dbt_ls(select_statement: str = ''):
             text=True,
             check=True,
         )
+        # dbt ls writes informative messages to stderr (like "Using default selector...")
+        # We should print these to stderr so the user sees them.
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+            
         # The output is a series of JSON objects, one per line.
         return [line for line in result.stdout.strip().split('\n') if line]
     except FileNotFoundError:
@@ -41,47 +47,57 @@ def run_dbt_ls(select_statement: str = ''):
 def slim_node(node):
     """
     Returns a slimmed-down version of a manifest node dictionary,
-    based on the keys defined in memory.md.
+    using Pydantic models for validation and schema definition.
     """
     config = node.get('config', {})
-    return {
-        'schema': node.get('schema'),
-        'name': node.get('name'),
-        'resource_type': node.get('resource_type'),
-        'unique_id': node.get('unique_id'),
-        'config': {
-            'materialized': config.get('materialized'),
-            'enabled': config.get('enabled'),
-            'incremental_strategy': config.get('incremental_strategy')
-        },
-        'tags': node.get('tags'),
-        'raw_code': node.get('raw_code'),
-        'refs': node.get('refs'),
-        'sources': node.get('sources'),
-        'depends_on': node.get('depends_on'),
-        'compiled_code': node.get('compiled_code')
-    }
+    
+    # Create config object
+    slim_config = SlimNodeConfig(
+        materialized=config.get('materialized'),
+        enabled=config.get('enabled'),
+        incremental_strategy=config.get('incremental_strategy')
+    )
+    
+    # Create node object
+    # Note: 'schema' in manifest maps to 'schema_name' in model (aliased as 'schema')
+    slim_node_obj = SlimNode(
+        schema_name=node.get('schema'),
+        name=node.get('name'),
+        resource_type=node.get('resource_type'),
+        unique_id=node.get('unique_id'),
+        config=slim_config,
+        tags=node.get('tags'),
+        raw_code=node.get('raw_code'),
+        refs=node.get('refs'),
+        sources=node.get('sources'),
+        depends_on=node.get('depends_on'),
+        compiled_code=node.get('compiled_code')
+    )
+    
+    return slim_node_obj.model_dump(exclude_none=True, by_alias=True)
     
 def slim_source(source):
     """
     Returns a slimmed-down version of a manifest source dictionary.
     """
-    return {
-        'database': source.get('database'),
-        'schema': source.get('schema'),
-        'name': source.get('name'),
-        'unique_id': source.get('unique_id'),
-        'description': source.get('description')
-    }
+    slim_source_obj = SlimSource(
+        database=source.get('database'),
+        schema_name=source.get('schema'),
+        name=source.get('name'),
+        unique_id=source.get('unique_id'),
+        description=source.get('description')
+    )
+    return slim_source_obj.model_dump(exclude_none=True, by_alias=True)
 
 def slim_macro(macro):
     """
     Returns a slimmed-down version of a manifest macro dictionary.
     """
-    return {
-        'unique_id': macro.get('unique_id'),
-        'macro_sql': macro.get('macro_sql')
-    }
+    slim_macro_obj = SlimMacro(
+        unique_id=macro.get('unique_id'),
+        macro_sql=macro.get('macro_sql')
+    )
+    return slim_macro_obj.model_dump(exclude_none=True, by_alias=True)
 
 
 def main():
@@ -108,6 +124,12 @@ def main():
         "--out-file",
         help="The path to write the filtered manifest JSON file.",
         default='manifest_slim.json'
+    )
+
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Validate that all selected resources are present in the output. Exits 1 if missing items.",
     )
 
     args = parser.parse_args()
@@ -168,6 +190,13 @@ def main():
 
     # Filter the manifest and slim it down
     slim_manifest = {
+        '$manifest_schema': {
+            'description': 'Schema for dbt-mp manifest_slim output. Consult before querying.',
+            'node_schema': SlimNode.model_json_schema(),
+            'source_schema': SlimSource.model_json_schema(),
+            'macro_schema': SlimMacro.model_json_schema()
+        },
+        '$dbt_ls_selection': selected_unique_ids,
         'selection_used': args.select,
         'nodes': {},
         'sources': {},
@@ -197,6 +226,23 @@ def main():
     except IOError as e:
         print(f"Error writing to file '{args.out_file}': {e}", file=sys.stderr)
         sys.exit(1)
+
+    if args.validate:
+        expected = set(selected_unique_ids)
+        # Note: We check nodes and sources. Macros are often implicit dependencies so strict validation
+        # on dbt ls output (which might not list macros unless selected) vs manifest (which has them in depends_on)
+        # can be tricky. We focus on the primary selected resources.
+        actual = set(slim_manifest['nodes'].keys()) | set(slim_manifest['sources'].keys())
+        missing = expected - actual
+        
+        if missing:
+            print(f"VALIDATION FAILED - Missing {len(missing)} items:", file=sys.stderr)
+            for item in sorted(missing):
+                print(f"  - {item}", file=sys.stderr)
+            sys.exit(1)
+        else:
+            print(f"VALIDATION PASSED - All {len(expected)} items present")
+            sys.exit(0)
 
 
 if __name__ == "__main__":
