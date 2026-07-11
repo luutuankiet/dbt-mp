@@ -86,22 +86,29 @@ Because the prod manifest carries the real `relation_name` for every node and so
 
 Every output file embeds a self-describing `$manifest_schema` block at the top. Beyond the JSON schema for each resource, it now includes:
 
+- `source_manifest` — provenance of the manifest the slice was parsed from (`dbt_version`, `adapter_type`, `project_name`, ...).
+- `selection_used` — the `--select` string that produced the slice.
+- `resource_counts` — aggregate cardinality per resource type (e.g. `{"test": 746, "model": 407, ...}`), so an agent knows the shape of the slice — and that tests usually dominate — before writing any query.
 - `structure` / `querying_the_warehouse` — plain-English notes on how the file is laid out and how to turn a model into a real warehouse query (use `relation_name` verbatim).
-- `jq_recipes` — ready-to-run `jq` snippets for the questions agents ask most, e.g. *"what exact deps does this model depend on?"*:
+- `jq_guardrails` — the failure modes to avoid: guard missing keys with `// {}` / `// []`, filter to models before lineage walks, project single fields instead of dumping whole nodes.
+- `jq_recipes` — ready-to-run, null-safe `jq` snippets for the questions agents ask most, e.g. *"what exact deps does this model depend on?"*:
 
 ```bash
 # Direct upstream deps (models + sources) of a model
-jq '.nodes["model.project.stg_orders"].depends_on.nodes' slim_manifest.json
+jq '.nodes["model.project.stg_orders"].depends_on.nodes // []' slim_manifest.json
 
 # Those deps, resolved to the warehouse relation you'd actually query
-jq -r '.nodes["model.project.stg_orders"].depends_on.nodes[] as $d
-        | (.nodes[$d] // .sources[$d]).relation_name' slim_manifest.json
+jq -r '(.nodes["model.project.stg_orders"].depends_on.nodes // [])[] as $d
+        | ((.nodes[$d] // .sources[$d] // {}).relation_name // $d)' slim_manifest.json
 
-# Reverse lineage: which models depend directly on a given node
+# Reverse lineage: which models depend directly on a given node (skips tests)
 jq '.nodes | to_entries
-    | map(select(.value.depends_on.nodes // [] | index("model.project.raw_orders")))
+    | map(select(.value.resource_type == "model"
+                 and ((.value.depends_on.nodes // []) | index("model.project.raw_orders"))))
     | map(.key)' slim_manifest.json
 ```
+
+`$dbt_ls_selection` — the full list of selected unique_ids, tests included — deliberately stays at the root rather than inside `$manifest_schema`, since it can run to hundreds of entries.
 
 ### dbt executable resolution
 
@@ -109,7 +116,7 @@ On the live path (non-`--offline`), `dbt-mp` locates the dbt CLI automatically, 
 
 ### Manifest version tolerance
 
-`dbt-mp` is intentionally **not** pinned to a manifest schema version. It reads a small set of stable, high-signal keys defensively, so a newer or older `manifest.json` degrades gracefully (missing keys are simply omitted) rather than breaking. Every output echoes the source manifest's provenance under `$source_manifest` (`dbt_version`, `dbt_schema_version`, `adapter_type`, `project_name`, `generated_at`) so any version mismatch is visible to the consuming agent rather than silent.
+`dbt-mp` is intentionally **not** pinned to a manifest schema version. It reads a small set of stable, high-signal keys defensively, so a newer or older `manifest.json` degrades gracefully (missing keys are simply omitted) rather than breaking. Every output echoes the source manifest's provenance under `$manifest_schema.source_manifest` (`dbt_version`, `dbt_schema_version`, `adapter_type`, `project_name`, `generated_at`) so any version mismatch is visible to the consuming agent rather than silent.
 
 ---
 

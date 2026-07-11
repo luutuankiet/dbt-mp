@@ -60,6 +60,26 @@ def _source_manifest_provenance(manifest):
     return {k: v for k, v in provenance.items() if v is not None}
 
 
+def _resource_counts(slim_nodes, slim_sources, slim_macros):
+    """Aggregate cardinality of the slice, per resource type.
+
+    A cheap cache so a consuming agent knows the shape of the slice before
+    writing any jq (e.g. 300 tests vs 100 models -> filter to models when
+    tracing lineage). Computed from the already-slimmed output, so it works
+    identically in --offline mode.
+    """
+    by_type = {}
+    for node in slim_nodes.values():
+        rtype = node.get('resource_type') or 'unknown'
+        by_type[rtype] = by_type.get(rtype, 0) + 1
+    return {
+        'nodes_total': len(slim_nodes),
+        'nodes_by_resource_type': dict(sorted(by_type.items(), key=lambda kv: -kv[1])),
+        'sources': len(slim_sources),
+        'macros': len(slim_macros),
+    }
+
+
 def slim_columns(raw_columns):
     """Slim a manifest 'columns' dict down to name/description/data_type.
 
@@ -298,73 +318,108 @@ def main():
     # Combine the selected nodes with their dependent macros
     final_selection_set = set(selected_unique_ids) | dependent_macros
 
-    # Filter the manifest and slim it down
+    # Filter and slim nodes/sources/macros FIRST so aggregate counts can be
+    # embedded in the schema header below.
+    slim_nodes = {}
+    for unique_id, node in manifest.get('nodes', {}).items():
+        if unique_id in final_selection_set:
+            slim_nodes[unique_id] = slim_node(node)
+
+    slim_sources = {}
+    for unique_id, source in manifest.get('sources', {}).items():
+        if unique_id in final_selection_set:
+            slim_sources[unique_id] = slim_source(source)
+
+    slim_macros = {}
+    for unique_id, macro in manifest.get('macros', {}).items():
+        if unique_id in final_selection_set:
+            slim_macros[unique_id] = slim_macro(macro)
+
+    resource_counts = _resource_counts(slim_nodes, slim_sources, slim_macros)
+
+    # Assemble the slim manifest. `$manifest_schema` is the self-describing
+    # header: schema, provenance, selection, aggregate counts and query guide.
     slim_manifest = {
         '$manifest_schema': {
-            'description': 'Schema + query guide for the dbt-mp manifest_slim output. Consult before querying.',
+            'description': (
+                'Schema, aggregate stats and query guide for the dbt-mp manifest_slim output. '
+                'Read resource_counts and jq_guardrails before writing any jq.'
+            ),
             'structure': (
                 'Top level: `nodes`, `sources`, `macros` are objects keyed by unique_id. '
-                '`$dbt_ls_selection` holds the unique_ids that were explicitly selected; any other '
-                'entry in `nodes`/`sources` is an upstream dependency pulled in for context.'
+                '`$dbt_ls_selection` (root key, can be long - tests included) holds the unique_ids '
+                'that were explicitly selected; any other entry in `nodes`/`sources` is an upstream '
+                'dependency pulled in for context. This block also carries `source_manifest` '
+                '(provenance of the manifest this slice was parsed from), `selection_used` '
+                '(the --select string) and `resource_counts` (cardinality per resource type).'
             ),
+            'source_manifest': _source_manifest_provenance(manifest),
+            'selection_used': args.select,
+            'resource_counts': resource_counts,
             'querying_the_warehouse': (
                 'To query a model or source in the data warehouse, use its `relation_name` '
                 '(already fully-qualified & quoted, e.g. "db"."schema"."table") verbatim in the FROM '
                 'clause. Do NOT rebuild it from `schema`+`name` - `relation_name` already accounts for '
                 'custom schema/database/alias config.'
             ),
+            'jq_guardrails': [
+                'Missing keys return null, and piping null onward raises errors like '
+                '"null (null) has no keys". Guard every indexed access: `.nodes[$id] // {}` '
+                'for objects, `.depends_on.nodes // []` for arrays.',
+                'unique_ids inside depends_on may not exist in this slice. Resolve with a '
+                'fallback chain: `(.nodes[$d] // .sources[$d] // {})`.',
+                'Check resource_counts first: tests often outnumber models. For lineage '
+                'questions filter to models/sources and skip tests, e.g. '
+                '`.nodes | with_entries(select(.value.resource_type == "model"))`.',
+                'Keep result footprints lean - never dump whole node objects or `.nodes` '
+                'wholesale; `raw_code`/`compiled_code` can be hundreds of lines each. '
+                'Project only the fields you need.',
+                'Scout size before extracting values: `length`, `keys`, `map(.key)` are '
+                'cheap; dumping values is not.',
+            ],
             'jq_recipes': [
                 {
                     'question': 'Direct upstream deps (models + sources) of a model',
-                    'jq': '.nodes["<unique_id>"].depends_on.nodes'
+                    'jq': '.nodes["<unique_id>"].depends_on.nodes // []'
                 },
                 {
-                    'question': 'Direct deps resolved to their warehouse relation_name',
-                    'jq': '.nodes["<unique_id>"].depends_on.nodes[] as $d | (.nodes[$d] // .sources[$d]).relation_name'
+                    'question': 'Direct deps resolved to their warehouse relation_name (null-safe)',
+                    'jq': '(.nodes["<unique_id>"].depends_on.nodes // [])[] as $d | ((.nodes[$d] // .sources[$d] // {}).relation_name // $d)'
                 },
                 {
                     'question': 'Macros a model depends on',
-                    'jq': '.nodes["<unique_id>"].depends_on.macros'
+                    'jq': '.nodes["<unique_id>"].depends_on.macros // []'
                 },
                 {
-                    'question': 'Reverse lineage: which models depend directly on a given unique_id',
-                    'jq': '.nodes | to_entries | map(select(.value.depends_on.nodes // [] | index("<unique_id>"))) | map(.key)'
+                    'question': 'Reverse lineage: models that depend directly on a given unique_id (skips tests)',
+                    'jq': '.nodes | to_entries | map(select(.value.resource_type == "model" and ((.value.depends_on.nodes // []) | index("<unique_id>")))) | map(.key)'
+                },
+                {
+                    'question': 'All model unique_ids in this slice (skip tests/seeds/snapshots)',
+                    'jq': '.nodes | to_entries | map(select(.value.resource_type == "model") | .key)'
                 },
                 {
                     'question': 'Full dependency map: every model -> its direct upstream nodes',
-                    'jq': '.nodes | map_values(.depends_on.nodes)'
+                    'jq': '.nodes | with_entries(select(.value.resource_type == "model")) | map_values(.depends_on.nodes // [])'
                 },
                 {
                     'question': 'Lookup table of every node/source unique_id -> warehouse relation_name',
                     'jq': '(.nodes + .sources) | map_values(.relation_name)'
+                },
+                {
+                    'question': 'Compiled SQL of one model, nothing else (lean)',
+                    'jq': '.nodes["<unique_id>"].compiled_code // "<<not compiled>>"'
                 }
             ],
             'node_schema': SlimNode.model_json_schema(),
             'source_schema': SlimSource.model_json_schema(),
             'macro_schema': SlimMacro.model_json_schema()
         },
-        '$source_manifest': _source_manifest_provenance(manifest),
         '$dbt_ls_selection': selected_unique_ids,
-        'selection_used': args.select,
-        'nodes': {},
-        'sources': {},
-        'macros': {}
+        'nodes': slim_nodes,
+        'sources': slim_sources,
+        'macros': slim_macros
     }
-
-    # Filter and slim nodes
-    for unique_id, node in manifest.get('nodes', {}).items():
-        if unique_id in final_selection_set:
-            slim_manifest['nodes'][unique_id] = slim_node(node)
-            
-    # Filter and slim sources
-    for unique_id, source in manifest.get('sources', {}).items():
-        if unique_id in final_selection_set:
-            slim_manifest['sources'][unique_id] = slim_source(source)
-
-    # Filter and slim macros
-    for unique_id, macro in manifest.get('macros', {}).items():
-        if unique_id in final_selection_set:
-            slim_manifest['macros'][unique_id] = slim_macro(macro)
 
     # 5. Write the result to the output file
     try:
