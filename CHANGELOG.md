@@ -1,5 +1,21 @@
 # CHANGELOG
 
+## v0.3.0 (2026-07-11)
+
+### Feature
+
+* feat: nest provenance and selection into $manifest_schema with resource counts and null-safe jq recipes
+
+- move $source_manifest and selection_used under $manifest_schema (root stays lean)
+
+- add resource_counts: per-resource-type cardinality so agents can size the slice (e.g. tests vs models) before querying
+
+- add jq_guardrails + rewrite jq_recipes null-safe and lean: guard missing keys with // {} and // [], filter lineage walks to models, project single fields instead of dumping nodes
+
+- keep $dbt_ls_selection at root (can run to hundreds of entries on test-heavy projects)
+
+- works identically in --offline mode: counts are computed from the slimmed output itself ([`0e267a6`](https://github.com/luutuankiet/dbt-mp/commit/0e267a6139351ea7cce47da41d2c601293d8010c))
+
 ## v0.2.2 (2026-07-11)
 
 ### Fix
