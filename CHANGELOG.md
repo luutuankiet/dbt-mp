@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## v0.2.2 (2026-07-11)
+
+### Fix
+
+* fix: force v0.2.2 release to publish to pypi (v0.2.1 tagged but never published) ([`9c72311`](https://github.com/luutuankiet/dbt-mp/commit/9c723119c6721495d0a46454e0c17a7286ac664a))
+
+## v0.2.1 (2026-07-11)
+
+### Unknown
+
+* Add offline mode and improve manifest slicing with columns &amp; relation_name (#3)
+
+Co-authored-by: Claude Opus 4.8 &lt;noreply@anthropic.com&gt;
+Co-authored-by: Claude &lt;noreply@anthropic.com&gt; ([`82b99fe`](https://github.com/luutuankiet/dbt-mp/commit/82b99fe7a1964cc69e476a9f6b4276240c30d6fe))
+
 ## v0.2.0 (2026-02-07)
 
 ### Documentation
