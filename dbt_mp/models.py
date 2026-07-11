@@ -35,6 +35,10 @@ class SlimNode(BaseModel):
         default=None,
         description="Fully qualified name (e.g., model.project.model_name) - use as lookup key"
     )
+    relation_name: Optional[str] = Field(
+        default=None,
+        description="Fully-qualified, quoted warehouse relation (e.g. \"db\".\"schema\".\"table\") - the exact identifier to put in a FROM clause when querying this model in the data warehouse"
+    )
     config: Optional[SlimNodeConfig] = Field(
         default=None,
         description="Model configuration subset"
@@ -82,6 +86,10 @@ class SlimSource(BaseModel):
     unique_id: Optional[str] = Field(
         default=None,
         description="Fully qualified source ID (e.g., source.project.source_name.table_name)"
+    )
+    relation_name: Optional[str] = Field(
+        default=None,
+        description="Fully-qualified, quoted warehouse relation (e.g. \"db\".\"schema\".\"table\") - the exact identifier to put in a FROM clause when querying this source in the data warehouse"
     )
     description: Optional[str] = Field(
         default=None,

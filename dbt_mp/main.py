@@ -4,6 +4,7 @@ import subprocess
 import sys
 import logging
 from dbt_mp.models import SlimNode, SlimNodeConfig, SlimSource, SlimMacro
+from dbt_mp.selection import resolve_selection
 
 def run_dbt_ls(select_statement: str = ''):
     """
@@ -65,6 +66,7 @@ def slim_node(node):
         name=node.get('name'),
         resource_type=node.get('resource_type'),
         unique_id=node.get('unique_id'),
+        relation_name=node.get('relation_name'),
         config=slim_config,
         tags=node.get('tags'),
         raw_code=node.get('raw_code'),
@@ -85,6 +87,7 @@ def slim_source(source):
         schema_name=source.get('schema'),
         name=source.get('name'),
         unique_id=source.get('unique_id'),
+        relation_name=source.get('relation_name'),
         description=source.get('description')
     )
     return slim_source_obj.model_dump(exclude_none=True, by_alias=True)
@@ -127,6 +130,17 @@ def main():
     )
 
     parser.add_argument(
+        "--offline",
+        action="store_true",
+        help=(
+            "Parse an existing (e.g. downloaded prod) manifest without running "
+            "'dbt compile'/'dbt ls'. Selection is resolved from the manifest's "
+            "parent_map/child_map graph. Everything (compiled_code, relation_name, "
+            "deps) is already baked into the manifest, so no dbt project is needed."
+        ),
+    )
+
+    parser.add_argument(
         "--validate",
         action="store_true",
         help="Validate that all selected resources are present in the output. Exits 1 if missing items.",
@@ -134,17 +148,20 @@ def main():
 
     args = parser.parse_args()
 
-    # Compile and load the full manifest.json
+    # Compile (unless offline) and load the full manifest.json
     try:
-        compile_command = ["dbt", "compile", "--select", args.select] if args.select else ["dbt", "compile"]
-        print("Compiling models sql with command: " + ' '.join(compile_command))
-        subprocess.run(
-            compile_command,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        
+        if not args.offline:
+            compile_command = ["dbt", "compile", "--select", args.select] if args.select else ["dbt", "compile"]
+            print("Compiling models sql with command: " + ' '.join(compile_command))
+            subprocess.run(
+                compile_command,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        else:
+            print(f"Offline mode: using existing manifest at '{args.manifest_path}' (skipping dbt compile/ls).")
+
         with open(args.manifest_path, 'r') as f:
             manifest = json.load(f)
     except FileNotFoundError:
@@ -154,23 +171,28 @@ def main():
     except json.JSONDecodeError:
         print(f"Error: Could not decode JSON from '{args.manifest_path}'.", file=sys.stderr)
         sys.exit(1)
-    
-    # Run 'dbt ls' to get the list of selected models and sources
-    ls_output_lines = run_dbt_ls(args.select)
-    
-    selected_unique_ids = []
-    for line in ls_output_lines:
-        if line.startswith('{'):
-            try:
-                json_line = json.loads(line)
-                selected_unique_ids.append(json_line.get('unique_id'))
-            except json.JSONDecodeError:
-                print(f"Warning: Could not decode JSON from dbt ls output line: {line}", file=sys.stderr)
-        else:
-            print(line)
-            
-    selected_unique_ids = [uid for uid in selected_unique_ids if uid]
-    print(f"Found {len(selected_unique_ids)} matching models and sources from 'dbt ls'.")
+
+    if args.offline:
+        # Resolve selection directly from the manifest graph - no dbt invocation.
+        selected_unique_ids = sorted(resolve_selection(manifest, args.select))
+        print(f"Found {len(selected_unique_ids)} matching models and sources from the manifest graph.")
+    else:
+        # Run 'dbt ls' to get the list of selected models and sources
+        ls_output_lines = run_dbt_ls(args.select)
+
+        selected_unique_ids = []
+        for line in ls_output_lines:
+            if line.startswith('{'):
+                try:
+                    json_line = json.loads(line)
+                    selected_unique_ids.append(json_line.get('unique_id'))
+                except json.JSONDecodeError:
+                    print(f"Warning: Could not decode JSON from dbt ls output line: {line}", file=sys.stderr)
+            else:
+                print(line)
+
+        selected_unique_ids = [uid for uid in selected_unique_ids if uid]
+        print(f"Found {len(selected_unique_ids)} matching models and sources from 'dbt ls'.")
 
 
     # Find all dependent macros
@@ -191,7 +213,44 @@ def main():
     # Filter the manifest and slim it down
     slim_manifest = {
         '$manifest_schema': {
-            'description': 'Schema for dbt-mp manifest_slim output. Consult before querying.',
+            'description': 'Schema + query guide for the dbt-mp manifest_slim output. Consult before querying.',
+            'structure': (
+                'Top level: `nodes`, `sources`, `macros` are objects keyed by unique_id. '
+                '`$dbt_ls_selection` holds the unique_ids that were explicitly selected; any other '
+                'entry in `nodes`/`sources` is an upstream dependency pulled in for context.'
+            ),
+            'querying_the_warehouse': (
+                'To query a model or source in the data warehouse, use its `relation_name` '
+                '(already fully-qualified & quoted, e.g. "db"."schema"."table") verbatim in the FROM '
+                'clause. Do NOT rebuild it from `schema`+`name` - `relation_name` already accounts for '
+                'custom schema/database/alias config.'
+            ),
+            'jq_recipes': [
+                {
+                    'question': 'Direct upstream deps (models + sources) of a model',
+                    'jq': '.nodes["<unique_id>"].depends_on.nodes'
+                },
+                {
+                    'question': 'Direct deps resolved to their warehouse relation_name',
+                    'jq': '.nodes["<unique_id>"].depends_on.nodes[] as $d | (.nodes[$d] // .sources[$d]).relation_name'
+                },
+                {
+                    'question': 'Macros a model depends on',
+                    'jq': '.nodes["<unique_id>"].depends_on.macros'
+                },
+                {
+                    'question': 'Reverse lineage: which models depend directly on a given unique_id',
+                    'jq': '.nodes | to_entries | map(select(.value.depends_on.nodes // [] | index("<unique_id>"))) | map(.key)'
+                },
+                {
+                    'question': 'Full dependency map: every model -> its direct upstream nodes',
+                    'jq': '.nodes | map_values(.depends_on.nodes)'
+                },
+                {
+                    'question': 'Lookup table of every node/source unique_id -> warehouse relation_name',
+                    'jq': '(.nodes + .sources) | map_values(.relation_name)'
+                }
+            ],
             'node_schema': SlimNode.model_json_schema(),
             'source_schema': SlimSource.model_json_schema(),
             'macro_schema': SlimMacro.model_json_schema()

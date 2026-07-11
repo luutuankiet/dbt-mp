@@ -70,6 +70,39 @@ dbt-mp --select '+stg_orders+' --out-file filtered_manifest.json
 
 The resulting `slim_manifest.json` will contain a lean, context-rich representation of the selected slice of your dbt project.
 
+### Offline mode (slim a downloaded prod manifest)
+
+If you already have a `manifest.json` (for example, one downloaded from your production dbt run), you don't need a working dbt project, a warehouse connection, or to run `dbt compile`/`dbt ls` at all — everything (`compiled_code`, `relation_name`, dependencies, and the lineage graph) is already baked into the manifest. Pass `--offline` to slice it directly:
+
+```bash
+dbt-mp --offline --manifest-path prod_manifest.json --select '+stg_orders+' --out-file slim_manifest.json
+```
+
+In offline mode, selection is resolved from the manifest's own `parent_map`/`child_map`, supporting the common graph operators: `model`, `+model`, `model+`, `+model+`, `N+model` (ancestors up to N edges), and `model+N` (descendants up to N edges). Multiple selectors separated by whitespace are unioned. Omitting `--select` slims the entire manifest. (Method selectors like `tag:` / `path:` and set operators are only available on the live dbt path.)
+
+Because the prod manifest carries the real `relation_name` for every node and source, the slimmed output tells an agent the exact fully-qualified warehouse table to query in production.
+
+### Querying the output with `jq`
+
+Every output file embeds a self-describing `$manifest_schema` block at the top. Beyond the JSON schema for each resource, it now includes:
+
+- `structure` / `querying_the_warehouse` — plain-English notes on how the file is laid out and how to turn a model into a real warehouse query (use `relation_name` verbatim).
+- `jq_recipes` — ready-to-run `jq` snippets for the questions agents ask most, e.g. *"what exact deps does this model depend on?"*:
+
+```bash
+# Direct upstream deps (models + sources) of a model
+jq '.nodes["model.project.stg_orders"].depends_on.nodes' slim_manifest.json
+
+# Those deps, resolved to the warehouse relation you'd actually query
+jq -r '.nodes["model.project.stg_orders"].depends_on.nodes[] as $d
+        | (.nodes[$d] // .sources[$d]).relation_name' slim_manifest.json
+
+# Reverse lineage: which models depend directly on a given node
+jq '.nodes | to_entries
+    | map(select(.value.depends_on.nodes // [] | index("model.project.raw_orders")))
+    | map(.key)' slim_manifest.json
+```
+
 ---
 
 ## Core Attributes for Contextual Quality
@@ -82,6 +115,7 @@ The resulting `slim_manifest.json` will contain a lean, context-rich representat
 | --------------------------------- | ------------------------------------------------------------------------------------------- |
 | `schema`, `name`, `resource_type` | Basic identifiers for the node.                                                             |
 | `unique_id`                       | The canonical, unique identifier within the dbt graph.                                      |
+| `relation_name`                   | The fully-qualified, quoted warehouse relation (e.g. `"db"."schema"."table"`) — the exact identifier to put in a `FROM` clause to query this model. |
 | `config` (subset)                 | Key configuration like `materialized` and `enabled` are crucial for understanding behavior. |
 | `tags`, `columns`                 | Metadata and column-level descriptions provide essential semantic context.                  |
 | `raw_code`, `compiled_code`       | The original and compiled SQL are the most critical assets for code analysis.               |
@@ -93,6 +127,7 @@ The resulting `slim_manifest.json` will contain a lean, context-rich representat
 | ---------------------------- | ------------------------------------------------ |
 | `database`, `schema`, `name` | Identifiers for the source table.                |
 | `unique_id`                  | The canonical identifier for the source.         |
+| `relation_name`              | The fully-qualified, quoted warehouse relation to query this source. |
 | `description`                | Semantic context for what the source represents. |
 
 ### `macros`
