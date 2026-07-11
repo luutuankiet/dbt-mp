@@ -1,6 +1,22 @@
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 
+class SlimColumn(BaseModel):
+    """A slimmed-down column definition (from a model or source)."""
+    name: Optional[str] = Field(
+        default=None,
+        description="Column name as it appears in the warehouse table"
+    )
+    description: Optional[str] = Field(
+        default=None,
+        description="Documented meaning of the column, if provided in the dbt project"
+    )
+    data_type: Optional[str] = Field(
+        default=None,
+        description="Column data type, when declared in the dbt project (may be absent)"
+    )
+
+
 class SlimNodeConfig(BaseModel):
     """Configuration subset for a dbt node."""
     materialized: Optional[str] = Field(
@@ -46,6 +62,10 @@ class SlimNode(BaseModel):
     tags: Optional[List[str]] = Field(
         default=None,
         description="Tags applied to this model for selection/organization"
+    )
+    columns: Optional[Dict[str, SlimColumn]] = Field(
+        default=None,
+        description="Documented columns this model emits, keyed by column name. Only populated when declared in the dbt project - inspect for the model's output schema"
     )
     raw_code: Optional[str] = Field(
         default=None,
@@ -94,6 +114,10 @@ class SlimSource(BaseModel):
     description: Optional[str] = Field(
         default=None,
         description="Description of the source table"
+    )
+    columns: Optional[Dict[str, SlimColumn]] = Field(
+        default=None,
+        description="Documented columns this source emits, keyed by column name. Only populated when declared in the dbt project - inspect to understand what the source table provides"
     )
 
 class SlimMacro(BaseModel):

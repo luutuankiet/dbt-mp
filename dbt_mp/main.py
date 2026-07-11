@@ -1,12 +1,89 @@
 import argparse
 import json
+import os
+import shutil
 import subprocess
 import sys
 import logging
-from dbt_mp.models import SlimNode, SlimNodeConfig, SlimSource, SlimMacro
+from dbt_mp.models import SlimNode, SlimNodeConfig, SlimSource, SlimMacro, SlimColumn
 from dbt_mp.selection import resolve_selection
 
-def run_dbt_ls(select_statement: str = ''):
+
+def resolve_dbt_executable():
+    """Locate the dbt CLI to invoke.
+
+    Prefers a project virtualenv in the current working directory (./.venv or
+    ./venv) so `uvx dbt-mp` works even when the user hasn't `source`-d their
+    project venv, then a currently-active VIRTUAL_ENV, then dbt on PATH.
+    """
+    candidates = []
+    for venv_dir in ('.venv', 'venv'):
+        base = os.path.join(os.getcwd(), venv_dir)
+        candidates.append(os.path.join(base, 'bin', 'dbt'))
+        candidates.append(os.path.join(base, 'Scripts', 'dbt.exe'))  # Windows
+
+    virtual_env = os.environ.get('VIRTUAL_ENV')
+    if virtual_env:
+        candidates.append(os.path.join(virtual_env, 'bin', 'dbt'))
+        candidates.append(os.path.join(virtual_env, 'Scripts', 'dbt.exe'))
+
+    for path in candidates:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+
+    return shutil.which('dbt') or 'dbt'
+
+
+def _source_manifest_provenance(manifest):
+    """Surface the provenance of the manifest we parsed.
+
+    dbt-mp is intentionally NOT pinned to a manifest schema version - it reads a
+    small set of stable, high-signal keys defensively (via .get()), so a newer or
+    older manifest degrades gracefully instead of breaking. Echoing the source
+    manifest's version here makes any mismatch visible to the consuming agent
+    (e.g. "this slice came from dbt 1.11 / manifest v12 in prod") rather than
+    silent.
+    """
+    meta = manifest.get('metadata', {}) or {}
+    provenance = {
+        'note': (
+            'Provenance of the manifest this slice was parsed from. dbt-mp is not '
+            'locked to a schema version; it reads stable keys defensively.'
+        ),
+        'dbt_schema_version': meta.get('dbt_schema_version'),
+        'dbt_version': meta.get('dbt_version'),
+        'adapter_type': meta.get('adapter_type'),
+        'project_name': meta.get('project_name'),
+        'generated_at': meta.get('generated_at'),
+    }
+    # Drop any keys the source manifest didn't provide.
+    return {k: v for k, v in provenance.items() if v is not None}
+
+
+def slim_columns(raw_columns):
+    """Slim a manifest 'columns' dict down to name/description/data_type.
+
+    Empty strings are normalised to None (so exclude_none drops them), keeping
+    sparsely-documented columns lean. Returns None when there are no columns,
+    so the key is omitted entirely from the output.
+    """
+    if not raw_columns:
+        return None
+
+    slimmed = {}
+    for col_name, col in raw_columns.items():
+        col = col or {}
+        slim_col = SlimColumn(
+            name=col.get('name') or None,
+            description=(col.get('description') or None),
+            data_type=(col.get('data_type') or None),
+        ).model_dump(exclude_none=True)
+        if slim_col:
+            slimmed[col_name] = slim_col
+
+    return slimmed or None
+
+def run_dbt_ls(select_statement: str = '', dbt_executable: str = 'dbt'):
     """
     Runs the 'dbt ls' command with the given selection statement
     and returns a list of JSON objects, one for each resource.
@@ -14,8 +91,8 @@ def run_dbt_ls(select_statement: str = ''):
     # Corrected command: removed 'macro' from resource types
     try:
         command = [
-            "dbt", 
-            "ls", 
+            dbt_executable,
+            "ls",
             "--resource-type", 
             "model", 
             "source", 
@@ -38,7 +115,12 @@ def run_dbt_ls(select_statement: str = ''):
         # The output is a series of JSON objects, one per line.
         return [line for line in result.stdout.strip().split('\n') if line]
     except FileNotFoundError:
-        print("Error: 'dbt' command not found. Make sure dbt is installed and in your PATH.", file=sys.stderr)
+        print(
+            f"Error: dbt executable '{dbt_executable}' not found. Make sure dbt is installed "
+            "(e.g. in your project's ./.venv) and in your PATH, or use --offline to parse an "
+            "existing manifest without dbt.",
+            file=sys.stderr,
+        )
         sys.exit(1)
     except subprocess.CalledProcessError as e:
         print(f"Error executing dbt command: {e}", file=sys.stderr)
@@ -69,6 +151,7 @@ def slim_node(node):
         relation_name=node.get('relation_name'),
         config=slim_config,
         tags=node.get('tags'),
+        columns=slim_columns(node.get('columns')),
         raw_code=node.get('raw_code'),
         refs=node.get('refs'),
         sources=node.get('sources'),
@@ -88,7 +171,8 @@ def slim_source(source):
         name=source.get('name'),
         unique_id=source.get('unique_id'),
         relation_name=source.get('relation_name'),
-        description=source.get('description')
+        description=source.get('description'),
+        columns=slim_columns(source.get('columns'))
     )
     return slim_source_obj.model_dump(exclude_none=True, by_alias=True)
 
@@ -148,10 +232,14 @@ def main():
 
     args = parser.parse_args()
 
+    # Resolve the dbt CLI once (auto-detects a project ./.venv for uvx runs).
+    dbt_executable = resolve_dbt_executable()
+
     # Compile (unless offline) and load the full manifest.json
     try:
         if not args.offline:
-            compile_command = ["dbt", "compile", "--select", args.select] if args.select else ["dbt", "compile"]
+            print(f"Using dbt executable: {dbt_executable}")
+            compile_command = [dbt_executable, "compile", "--select", args.select] if args.select else [dbt_executable, "compile"]
             print("Compiling models sql with command: " + ' '.join(compile_command))
             subprocess.run(
                 compile_command,
@@ -178,7 +266,7 @@ def main():
         print(f"Found {len(selected_unique_ids)} matching models and sources from the manifest graph.")
     else:
         # Run 'dbt ls' to get the list of selected models and sources
-        ls_output_lines = run_dbt_ls(args.select)
+        ls_output_lines = run_dbt_ls(args.select, dbt_executable)
 
         selected_unique_ids = []
         for line in ls_output_lines:
@@ -255,6 +343,7 @@ def main():
             'source_schema': SlimSource.model_json_schema(),
             'macro_schema': SlimMacro.model_json_schema()
         },
+        '$source_manifest': _source_manifest_provenance(manifest),
         '$dbt_ls_selection': selected_unique_ids,
         'selection_used': args.select,
         'nodes': {},

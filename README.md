@@ -103,6 +103,14 @@ jq '.nodes | to_entries
     | map(.key)' slim_manifest.json
 ```
 
+### dbt executable resolution
+
+On the live path (non-`--offline`), `dbt-mp` locates the dbt CLI automatically, preferring a project virtualenv in the current directory (`./.venv` or `./venv`) before falling back to an active `VIRTUAL_ENV` and then `dbt` on your `PATH`. This means `uvx dbt-mp ...` works from a dbt project root even if you forgot to `source .venv/bin/activate`. The chosen executable is printed at the start of the run.
+
+### Manifest version tolerance
+
+`dbt-mp` is intentionally **not** pinned to a manifest schema version. It reads a small set of stable, high-signal keys defensively, so a newer or older `manifest.json` degrades gracefully (missing keys are simply omitted) rather than breaking. Every output echoes the source manifest's provenance under `$source_manifest` (`dbt_version`, `dbt_schema_version`, `adapter_type`, `project_name`, `generated_at`) so any version mismatch is visible to the consuming agent rather than silent.
+
 ---
 
 ## Core Attributes for Contextual Quality
@@ -117,7 +125,8 @@ jq '.nodes | to_entries
 | `unique_id`                       | The canonical, unique identifier within the dbt graph.                                      |
 | `relation_name`                   | The fully-qualified, quoted warehouse relation (e.g. `"db"."schema"."table"`) — the exact identifier to put in a `FROM` clause to query this model. |
 | `config` (subset)                 | Key configuration like `materialized` and `enabled` are crucial for understanding behavior. |
-| `tags`, `columns`                 | Metadata and column-level descriptions provide essential semantic context.                  |
+| `tags`                            | Metadata for selection/organization.                                                        |
+| `columns`                         | Per-column `name`/`description`/`data_type` (when documented) — the model's output schema. Omitted when the model has no documented columns. |
 | `raw_code`, `compiled_code`       | The original and compiled SQL are the most critical assets for code analysis.               |
 | `refs`, `sources`, `depends_on`   | The explicit dependency graph is fundamental for lineage tracing.                           |
 
@@ -129,6 +138,7 @@ jq '.nodes | to_entries
 | `unique_id`                  | The canonical identifier for the source.         |
 | `relation_name`              | The fully-qualified, quoted warehouse relation to query this source. |
 | `description`                | Semantic context for what the source represents. |
+| `columns`                    | Per-column `name`/`description`/`data_type` (when documented) — so an agent can see what the source table emits. |
 
 ### `macros`
 
