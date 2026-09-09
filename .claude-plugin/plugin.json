@@ -1,0 +1,21 @@
+{
+  "name": "dbt-mp",
+  "description": "Parse dbt manifest.json into token-optimised slim manifests for AI agent lineage work: orient, query, and diagnose dbt projects without loading the full manifest.",
+  "author": {
+    "name": "luutuankiet",
+    "url": "https://github.com/luutuankiet"
+  },
+  "homepage": "https://github.com/luutuankiet/dbt-mp",
+  "repository": "https://github.com/luutuankiet/dbt-mp",
+  "license": "MIT",
+  "keywords": [
+    "dbt",
+    "manifest",
+    "lineage",
+    "bigquery",
+    "data-engineering"
+  ],
+  "skills": [
+    "./skill"
+  ]
+}
